@@ -7,20 +7,26 @@
 typedef struct {
     char input_url[1024];
     char output_url[1024];
-    char local_addr[128];      /* Local interface IP for multicast bind */
-    int fifo_size;              /* UDP fifo size in bytes (e.g., 50MB) */
-    int buffer_size;            /* UDP socket receive buffer in bytes (e.g., 16MB) */
-    int overrun_nonfatal;       /* 1 to survive UDP buffer overruns */
-    int timeout_sec;            /* Network read timeout in seconds */
-    bool wait_keyframe;         /* Wait for first video keyframe before muxing */
-    bool normalize_pts;         /* Offset PTS/DTS to start from 0 */
-    bool print_stats;           /* Display live throughput & packet statistics */
-    int stats_interval_ms;      /* Interval in ms for live stats display (default: 1000) */
-    bool json_telemetry;        /* Output telemetry as JSON each second */
-    bool detailed_telemetry;    /* Output multi-line telemetry dashboard each second */
+    char local_addr[128];       /* Local interface IP for multicast bind */
+    int fifo_size;               /* UDP fifo size in bytes (e.g., 50MB) */
+    int buffer_size;             /* UDP socket receive buffer in bytes (e.g., 16MB) */
+    int overrun_nonfatal;        /* 1 to survive UDP buffer overruns */
+    int timeout_sec;             /* Network read timeout in seconds */
+    bool wait_keyframe;          /* Wait for first video keyframe before muxing */
+    bool normalize_pts;          /* Offset PTS/DTS to start from 0 */
+    bool print_stats;            /* Display live throughput & packet statistics */
+    int stats_interval_ms;       /* Interval in ms for live stats display (default: 1000) */
+    bool json_telemetry;         /* Output telemetry as JSON each second */
+    bool detailed_telemetry;     /* Output multi-line telemetry dashboard each second */
+    bool log_telemetry;          /* Output telemetry as timestamped LOG entries */
+    bool enable_diagnostics;     /* Real-time YouTube buffering & health diagnostics */
 } PipelineConfig;
 
 typedef struct {
+    /* Connection Diagnostics */
+    int64_t rtmp_connect_time_ms;
+    int64_t rtmp_handshake_time_ms;
+
     /* UDP Ingress Telemetry */
     uint64_t udp_packets_read;
     uint64_t udp_bytes_read;
@@ -40,6 +46,14 @@ typedef struct {
     /* Current Output Timestamps (milliseconds) */
     int64_t cur_video_pts_ms;
     int64_t cur_audio_pts_ms;
+    int64_t last_video_dts_ms;
+
+    /* Keyframe / GOP Diagnostics for YouTube */
+    int64_t last_keyframe_time_us;
+    double last_keyframe_interval_sec;
+    uint64_t total_keyframes_seen;
+    uint64_t num_timestamp_gaps;
+    uint64_t num_socket_slow_writes;
 
     /* Timing */
     int64_t start_time_us;

@@ -1,0 +1,6 @@
+*.o
+multicast2rtmp
+build/
+*.flv
+*.ts
+*.log

@@ -51,7 +51,9 @@ void pipeline_config_init_defaults(PipelineConfig *config) {
     config->wait_keyframe = true;              /* Synchronize on first keyframe */
     config->normalize_pts = true;              /* Offset timestamps starting at 0 */
     config->print_stats = true;
-    config->stats_interval_ms = 1000;          /* 1 second */
+    config->stats_interval_ms = 1000;          /* 1 second default telemetry interval */
+    config->json_telemetry = false;            /* JSON telemetry disabled by default */
+    config->detailed_telemetry = false;        /* Detailed multi-line telemetry */
 }
 
 void pipeline_request_stop(void) {
@@ -269,6 +271,7 @@ int pipeline_run(const PipelineConfig *config) {
 
     LOG_INFO("==================================================================");
     LOG_INFO("Pipeline active: Streaming UDP Multicast -> RTMP [Zero Encoding]");
+    LOG_INFO("Telemetry reporting active: 1-second interval");
     LOG_INFO("==================================================================");
 
     /* 8. Allocate packet and state tracking */
@@ -282,6 +285,8 @@ int pipeline_run(const PipelineConfig *config) {
     memset(&stats, 0, sizeof(stats));
     stats.start_time_us = get_time_us();
     stats.last_stats_time_us = stats.start_time_us;
+    stats.cur_video_pts_ms = AV_NOPTS_VALUE;
+    stats.cur_audio_pts_ms = AV_NOPTS_VALUE;
 
     bool seen_first_keyframe = !config->wait_keyframe;
     int64_t stream_first_pts[MAX_STREAMS];
@@ -312,7 +317,8 @@ int pipeline_run(const PipelineConfig *config) {
         }
 
         interrupt_ctx.last_packet_time_us = av_gettime_relative();
-        stats.total_packets_read++;
+        stats.udp_packets_read++;
+        stats.udp_bytes_read += pkt->size;
 
         int in_idx = pkt->stream_index;
         if (in_idx < 0 || in_idx >= (int)ifmt_ctx->nb_streams || stream_mapping[in_idx] < 0) {
@@ -333,13 +339,13 @@ int pipeline_run(const PipelineConfig *config) {
                     LOG_INFO("First video keyframe received (PTS=%lld). Starting transmission.",
                              (long long)pkt->pts);
                 } else {
-                    stats.dropped_pre_keyframe++;
+                    stats.udp_dropped_pre_keyframe++;
                     av_packet_unref(pkt);
                     continue;
                 }
             } else {
                 /* Drop audio packets until first video keyframe arrives to keep A/V in sync */
-                stats.dropped_pre_keyframe++;
+                stats.udp_dropped_pre_keyframe++;
                 av_packet_unref(pkt);
                 continue;
             }
@@ -386,6 +392,8 @@ int pipeline_run(const PipelineConfig *config) {
         pkt->pos = -1;
 
         int packet_size = pkt->size;
+        int64_t packet_pts = pkt->pts;
+
         ret = av_interleaved_write_frame(ofmt_ctx, pkt);
         if (ret < 0) {
             av_strerror(ret, err_buf, sizeof(err_buf));
@@ -394,41 +402,96 @@ int pipeline_run(const PipelineConfig *config) {
             break;
         }
 
-        stats.total_packets_written++;
-        stats.total_bytes_written += packet_size;
+        stats.rtmp_packets_written++;
+        stats.rtmp_bytes_written += packet_size;
         if (is_video) {
-            stats.video_packets_written++;
+            stats.rtmp_video_packets_written++;
+            stats.cur_video_pts_ms = packet_pts;
         } else {
-            stats.audio_packets_written++;
+            stats.rtmp_audio_packets_written++;
+            stats.cur_audio_pts_ms = packet_pts;
         }
 
         av_packet_unref(pkt);
 
-        /* Live throughput & statistics reporting */
+        /* Telemetry Reporting Each Second */
         if (config->print_stats) {
             int64_t now_us = get_time_us();
             int64_t elapsed_stats_us = now_us - stats.last_stats_time_us;
 
             if (elapsed_stats_us >= ((int64_t)config->stats_interval_ms * 1000LL)) {
                 double elapsed_sec = (double)elapsed_stats_us / 1000000.0;
-                double fps = (double)(stats.video_packets_written - stats.last_stats_video_pkts) / elapsed_sec;
-                double bitrate_kbps = ((double)(stats.total_bytes_written - stats.last_stats_bytes) * 8.0) /
-                                      (elapsed_sec * 1000.0);
+                int64_t uptime_sec = (now_us - stats.start_time_us) / 1000000LL;
 
-                char total_bytes_str[32];
-                format_bytes(stats.total_bytes_written, total_bytes_str, sizeof(total_bytes_str));
+                /* UDP Ingress Metrics */
+                double udp_bitrate_kbps = ((double)(stats.udp_bytes_read - stats.last_udp_bytes) * 8.0) /
+                                          (elapsed_sec * 1000.0);
+                double udp_pps = (double)(stats.udp_packets_read - stats.last_udp_packets) / elapsed_sec;
 
-                char uptime_str[32];
-                format_time((now_us - stats.start_time_us) / 1000000LL, uptime_str, sizeof(uptime_str));
+                /* RTMP Egress Metrics */
+                double rtmp_bitrate_kbps = ((double)(stats.rtmp_bytes_written - stats.last_rtmp_bytes) * 8.0) /
+                                           (elapsed_sec * 1000.0);
+                double rtmp_video_fps = (double)(stats.rtmp_video_packets_written - stats.last_rtmp_video_pkts) / elapsed_sec;
+                double rtmp_audio_pps = (double)(stats.rtmp_audio_packets_written - stats.last_rtmp_audio_pkts) / elapsed_sec;
 
-                printf("\r\033[36m[STREAMING]\033[0m Uptime: %s | Video: %5.1f fps (%llu pkts) | Audio: %llu pkts | Bitrate: %7.1f kbps | Total: %s   ",
-                       uptime_str, fps, (unsigned long long)stats.video_packets_written,
-                       (unsigned long long)stats.audio_packets_written, bitrate_kbps, total_bytes_str);
-                fflush(stdout);
+                /* A/V Sync Drift */
+                int64_t av_drift_ms = 0;
+                if (stats.cur_video_pts_ms != AV_NOPTS_VALUE && stats.cur_audio_pts_ms != AV_NOPTS_VALUE) {
+                    av_drift_ms = stats.cur_video_pts_ms - stats.cur_audio_pts_ms;
+                }
+
+                if (config->json_telemetry) {
+                    /* Structured JSON Telemetry Output (1 per second) */
+                    printf("{\"uptime_sec\":%lld,\"udp_in\":{\"bitrate_kbps\":%.1f,\"pps\":%.1f,\"total_packets\":%llu,\"total_bytes\":%llu,\"dropped_pre_keyframe\":%llu},\"rtmp_out\":{\"bitrate_kbps\":%.1f,\"video_fps\":%.1f,\"audio_pps\":%.1f,\"video_pts_ms\":%lld,\"audio_pts_ms\":%lld,\"av_drift_ms\":%lld,\"total_packets\":%llu,\"total_bytes\":%llu}}\n",
+                           (long long)uptime_sec,
+                           udp_bitrate_kbps, udp_pps,
+                           (unsigned long long)stats.udp_packets_read, (unsigned long long)stats.udp_bytes_read,
+                           (unsigned long long)stats.udp_dropped_pre_keyframe,
+                           rtmp_bitrate_kbps, rtmp_video_fps, rtmp_audio_pps,
+                           (long long)(stats.cur_video_pts_ms != AV_NOPTS_VALUE ? stats.cur_video_pts_ms : 0),
+                           (long long)(stats.cur_audio_pts_ms != AV_NOPTS_VALUE ? stats.cur_audio_pts_ms : 0),
+                           (long long)av_drift_ms,
+                           (unsigned long long)stats.rtmp_packets_written, (unsigned long long)stats.rtmp_bytes_written);
+                    fflush(stdout);
+                } else if (config->detailed_telemetry) {
+                    /* Multi-line Telemetry Card */
+                    char uptime_str[32], total_udp_str[32], total_rtmp_str[32];
+                    format_time(uptime_sec, uptime_str, sizeof(uptime_str));
+                    format_bytes(stats.udp_bytes_read, total_udp_str, sizeof(total_udp_str));
+                    format_bytes(stats.rtmp_bytes_written, total_rtmp_str, sizeof(total_rtmp_str));
+
+                    printf("\n\033[1;36m┌── [TELEMETRY REPORT @ %s] ──────────────────────────────────────────\033[0m\n", uptime_str);
+                    printf("│  \033[1;32m[UDP Ingress]\033[0m : %7.1f kbps  | %5.1f pkts/s  | In: %s (%llu pkts)\n",
+                           udp_bitrate_kbps, udp_pps, total_udp_str, (unsigned long long)stats.udp_packets_read);
+                    printf("│  \033[1;34m[RTMP Egress]\033[0m : %7.1f kbps  | %5.1f fps (V) | %5.1f pps (A) | Out: %s\n",
+                           rtmp_bitrate_kbps, rtmp_video_fps, rtmp_audio_pps, total_rtmp_str);
+                    printf("│  \033[1;33m[A/V & Sync ]\033[0m : Video PTS: %6.2fs | Audio PTS: %6.2fs | Drift: %+lld ms\n",
+                           (stats.cur_video_pts_ms != AV_NOPTS_VALUE ? (double)stats.cur_video_pts_ms / 1000.0 : 0.0),
+                           (stats.cur_audio_pts_ms != AV_NOPTS_VALUE ? (double)stats.cur_audio_pts_ms / 1000.0 : 0.0),
+                           (long long)av_drift_ms);
+                    printf("\033[1;36m└─────────────────────────────────────────────────────────────────────────────\033[0m\n");
+                    fflush(stdout);
+                } else {
+                    /* Compact Single-line Interactive Live Dashboard */
+                    char uptime_str[32], total_rtmp_str[32];
+                    format_time(uptime_sec, uptime_str, sizeof(uptime_str));
+                    format_bytes(stats.rtmp_bytes_written, total_rtmp_str, sizeof(total_rtmp_str));
+
+                    printf("\r\033[36m[%s]\033[0m \033[32mUDP In:\033[0m %6.1f kbps (%4.1f pps) │ \033[34mRTMP Out:\033[0m %6.1f kbps (%4.1f fps V, %4.1f pps A) │ \033[33mDrift:\033[0m %+3lldms │ \033[35mTotal:\033[0m %s   ",
+                           uptime_str,
+                           udp_bitrate_kbps, udp_pps,
+                           rtmp_bitrate_kbps, rtmp_video_fps, rtmp_audio_pps,
+                           (long long)av_drift_ms,
+                           total_rtmp_str);
+                    fflush(stdout);
+                }
 
                 stats.last_stats_time_us = now_us;
-                stats.last_stats_bytes = stats.total_bytes_written;
-                stats.last_stats_video_pkts = stats.video_packets_written;
+                stats.last_udp_bytes = stats.udp_bytes_read;
+                stats.last_udp_packets = stats.udp_packets_read;
+                stats.last_rtmp_bytes = stats.rtmp_bytes_written;
+                stats.last_rtmp_video_pkts = stats.rtmp_video_packets_written;
+                stats.last_rtmp_audio_pkts = stats.rtmp_audio_packets_written;
             }
         }
     }

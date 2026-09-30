@@ -30,12 +30,15 @@ static void print_usage(const char *prog_name) {
     printf("  -t, --timeout <sec>        Network read timeout in seconds (Default: 10)\n");
     printf("  -k, --no-wait-keyframe     Start immediately without waiting for first keyframe\n");
     printf("  -n, --no-normalize-pts     Do not offset PTS/DTS to start at 0\n");
-    printf("  -s, --stats-interval <ms>  Interval for live statistics in ms (Default: 1000)\n");
+    printf("  -s, --stats-interval <ms>  Interval for live telemetry in ms (Default: 1000)\n");
+    printf("  -d, --detailed             Display detailed multi-line telemetry cards each second\n");
+    printf("  -j, --json                 Output telemetry as 1-second JSON objects (stdout)\n");
     printf("  -v, --verbose              Enable debug logging\n");
     printf("  -h, --help                 Display this help message\n\n");
     printf("Examples:\n");
     printf("  %s -i udp://@239.255.0.1:1234 -o rtmp://127.0.0.1:1935/live/stream\n", prog_name);
-    printf("  %s -i udp://@239.255.10.20:5000 -a 192.168.1.50 -o rtmp://a.rtmp.youtube.com/live2/XXXX-XXXX\n", prog_name);
+    printf("  %s -i udp://@239.255.0.1:1234 -o rtmp://127.0.0.1:1935/live/stream --detailed\n", prog_name);
+    printf("  %s -i udp://@239.255.0.1:1234 -o rtmp://127.0.0.1:1935/live/stream --json\n", prog_name);
     printf("========================================================================\n");
 }
 
@@ -53,13 +56,15 @@ int main(int argc, char **argv) {
         {"no-wait-keyframe",  no_argument,       0, 'k'},
         {"no-normalize-pts",  no_argument,       0, 'n'},
         {"stats-interval",    required_argument, 0, 's'},
+        {"detailed",          no_argument,       0, 'd'},
+        {"json",              no_argument,       0, 'j'},
         {"verbose",           no_argument,       0, 'v'},
         {"help",              no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "i:o:a:f:b:t:kns:vh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "i:o:a:f:b:t:kns:djvh", long_options, NULL)) != -1) {
         switch (opt) {
             case 'i':
                 strncpy(config.input_url, optarg, sizeof(config.input_url) - 1);
@@ -91,6 +96,12 @@ int main(int argc, char **argv) {
                 config.stats_interval_ms = atoi(optarg);
                 if (config.stats_interval_ms < 100) config.stats_interval_ms = 100;
                 break;
+            case 'd':
+                config.detailed_telemetry = true;
+                break;
+            case 'j':
+                config.json_telemetry = true;
+                break;
             case 'v':
                 log_set_level(LOG_LVL_DEBUG);
                 break;
@@ -103,22 +114,27 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Print startup banner */
-    printf("\n\033[1;36m========================================================================\033[0m\n");
-    printf("\033[1;36m   Multicast -> RTMP Remuxing Pipeline (Zero-Encoding)\033[0m\n");
-    printf("\033[1;36m========================================================================\033[0m\n");
-    printf("  Input Multicast URL  : %s\n", config.input_url);
-    printf("  Output RTMP URL      : %s\n", config.output_url);
-    if (strlen(config.local_addr) > 0) {
-        printf("  Multicast Bind IP    : %s\n", config.local_addr);
+    if (!config.json_telemetry) {
+        /* Print startup banner */
+        printf("\n\033[1;36m========================================================================\033[0m\n");
+        printf("\033[1;36m   Multicast -> RTMP Remuxing Pipeline (Zero-Encoding)\033[0m\n");
+        printf("\033[1;36m========================================================================\033[0m\n");
+        printf("  Input Multicast URL  : %s\n", config.input_url);
+        printf("  Output RTMP URL      : %s\n", config.output_url);
+        if (strlen(config.local_addr) > 0) {
+            printf("  Multicast Bind IP    : %s\n", config.local_addr);
+        }
+        printf("  UDP FIFO Size        : %d MB\n", config.fifo_size / (1024 * 1024));
+        printf("  Socket Buffer Size   : %d MB\n", config.buffer_size / (1024 * 1024));
+        printf("  Read Timeout         : %d seconds\n", config.timeout_sec);
+        printf("  Wait First Keyframe  : %s\n", config.wait_keyframe ? "YES (clean start)" : "NO");
+        printf("  Normalize Timestamps : %s\n", config.normalize_pts ? "YES (starts at 0.0s)" : "NO");
+        printf("  Telemetry Interval   : %d ms (%s mode)\n",
+               config.stats_interval_ms,
+               config.detailed_telemetry ? "Detailed Multi-line" : "Dynamic Single-line");
+        printf("  Encoding Mode        : PASSTHROUGH / REMUX (0%% CPU Transcode Overhead)\n");
+        printf("\033[1;36m========================================================================\033[0m\n\n");
     }
-    printf("  UDP FIFO Size        : %d MB\n", config.fifo_size / (1024 * 1024));
-    printf("  Socket Buffer Size   : %d MB\n", config.buffer_size / (1024 * 1024));
-    printf("  Read Timeout         : %d seconds\n", config.timeout_sec);
-    printf("  Wait First Keyframe  : %s\n", config.wait_keyframe ? "YES (clean start)" : "NO");
-    printf("  Normalize Timestamps : %s\n", config.normalize_pts ? "YES (starts at 0.0s)" : "NO");
-    printf("  Encoding Mode        : PASSTHROUGH / REMUX (0%% CPU Transcode Overhead)\n");
-    printf("\033[1;36m========================================================================\033[0m\n\n");
 
     setup_signal_handlers(on_signal);
 

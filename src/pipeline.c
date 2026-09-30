@@ -532,7 +532,7 @@ int pipeline_run(const PipelineConfig *config) {
                     /* Standard Timestamped Console Log Entry */
                     char total_rtmp_str[32];
                     format_bytes(stats.rtmp_bytes_written, total_rtmp_str, sizeof(total_rtmp_str));
-                    LOG_INFO("[TELEMETRY] UDP: %.1f kbps (%.1f pps) | RTMP: %.1f kbps | %.1f fps (V) | %.1f pps (A) | Drift: %+lldms | GOP: %.1fs | Out: %s",
+                    LOG_INFO("UDP: %.1f kbps (%.1f pps) | RTMP: %.1f kbps | %.1f fps (V) | %.1f pps (A) | Drift: %+lldms | GOP: %.1fs | Out: %s",
                              udp_bitrate_kbps, udp_pps, rtmp_bitrate_kbps, rtmp_video_fps, rtmp_audio_pps,
                              (long long)av_drift_ms, stats.last_keyframe_interval_sec, total_rtmp_str);
                 } else if (config->detailed_telemetry) {
@@ -542,7 +542,7 @@ int pipeline_run(const PipelineConfig *config) {
                     format_bytes(stats.udp_bytes_read, total_udp_str, sizeof(total_udp_str));
                     format_bytes(stats.rtmp_bytes_written, total_rtmp_str, sizeof(total_rtmp_str));
 
-                    printf("\n\033[1;36m┌── [TELEMETRY REPORT @ %s] (RTMP: STREAMING) ────────────────────\033[0m\n", uptime_str);
+                    printf("\n\033[1;36m┌── [INFO @ %s] (RTMP: STREAMING) ────────────────────\033[0m\n", uptime_str);
                     printf("│  \033[1;32m[UDP Ingress]\033[0m : %7.1f kbps  | %5.1f pkts/s  | In: %s (%llu pkts)\n",
                            udp_bitrate_kbps, udp_pps, total_udp_str, (unsigned long long)stats.udp_packets_read);
                     printf("│  \033[1;34m[RTMP Egress]\033[0m : %7.1f kbps  | %5.1f fps (V) | %5.1f pps (A) | Out: %s\n",

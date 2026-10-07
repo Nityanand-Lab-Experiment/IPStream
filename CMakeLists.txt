@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(multicast2rtmp C)
+project(ixgIPStream VERSION 4.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -9,6 +9,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(AVFORMAT REQUIRED IMPORTED_TARGET libavformat)
 pkg_check_modules(AVCODEC REQUIRED IMPORTED_TARGET libavcodec)
 pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil)
+pkg_check_modules(SWSCALE REQUIRED IMPORTED_TARGET libswscale)
 
 set(SOURCES
     src/main.c
@@ -16,16 +17,17 @@ set(SOURCES
     src/utils.c
 )
 
-add_executable(multicast2rtmp ${SOURCES})
+add_executable(ixgIPStream ${SOURCES})
 
-target_include_directories(multicast2rtmp PRIVATE src)
+target_include_directories(ixgIPStream PRIVATE src)
 
-target_link_libraries(multicast2rtmp PRIVATE
+target_link_libraries(ixgIPStream PRIVATE
     PkgConfig::AVFORMAT
     PkgConfig::AVCODEC
     PkgConfig::AVUTIL
+    PkgConfig::SWSCALE
     pthread
     m
 )
 
-install(TARGETS multicast2rtmp DESTINATION bin)
+install(TARGETS ixgIPStream DESTINATION bin)

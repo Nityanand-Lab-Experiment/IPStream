@@ -1,9 +1,9 @@
 CC ?= gcc
 CFLAGS ?= -Wall -Wextra -O2 -std=c11
-TARGET = multicast2rtmp
+TARGET = ixgIPStream
 
 # FFmpeg pkg-config dependencies
-FFMPEG_LIBS = libavformat libavcodec libavutil
+FFMPEG_LIBS = libavformat libavcodec libavutil libswscale
 FFMPEG_CFLAGS = $(shell pkg-config --cflags $(FFMPEG_LIBS))
 FFMPEG_LDFLAGS = $(shell pkg-config --libs $(FFMPEG_LIBS)) -lpthread -lm
 

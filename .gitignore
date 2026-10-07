@@ -1,6 +1,27 @@
-*.o
+
 multicast2rtmp
+ixgIPStream
+
+# Compiled binaries and libraries
+ixgIPStream
+*.o
+*.a
+*.so
+
+# Build directories
 build/
-*.flv
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile.old
+
+# Temporary test logs and video outputs
 *.ts
 *.log
+*.flv
+/tmp/
+
+# Python cache (if any)
+__pycache__/
+*.pyc
+

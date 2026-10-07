@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # test_end_to_end.sh
-# End-to-end automated verification of the multicast2rtmp zero-encoding pipeline.
+# End-to-end automated verification of the ixgIPStream zero-encoding pipeline.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-BIN="$ROOT_DIR/multicast2rtmp"
+BIN="$ROOT_DIR/ixgIPStream"
 
 if [ ! -f "$BIN" ]; then
-    echo "Building multicast2rtmp..."
+    echo "Building ixgIPStream..."
     make -C "$ROOT_DIR"
 fi
 
@@ -40,7 +40,7 @@ ffmpeg -re -f lavfi -i "testsrc=size=640x360:rate=25" -f lavfi -i "sine=frequenc
 SIM_PID=$!
 sleep 1
 
-echo "=== [3/4] Running multicast2rtmp Pipeline for 5 seconds ==="
+echo "=== [3/4] Running ixgIPStream Pipeline for 5 seconds ==="
 "$BIN" -i "$TEST_UDP" -o "$TEST_RTMP" -f 10 -b 4 -t 5 &
 PIPELINE_PID=$!
 

@@ -1,4 +1,4 @@
-# ixgIPStream (v4.1) - Multicast to RTMP / HLS Streaming Pipeline (Zero-Encoding)
+# ixgIPStream - Multicast to RTMP / HLS Streaming Pipeline (Zero-Encoding)
 
 A high-performance, production-ready C streaming pipeline that ingests a live **UDP Multicast (MPEG-TS)** stream and forwards it to **RTMP servers** and/or **HLS CDNs** using native FFmpeg libraries (`libavformat`, `libavcodec`, `libavutil`) **without decoding or re-encoding** (Remuxing / Stream Copy).
 

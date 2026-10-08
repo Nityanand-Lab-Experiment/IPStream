@@ -25,3 +25,12 @@ Makefile.old
 __pycache__/
 *.pyc
 
+
+# Archive zip files
+*.zip
+
+# Generated PDF documentation
+*.pdf
+
+# Executables and test binaries
+udp

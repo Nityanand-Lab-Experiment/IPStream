@@ -50,7 +50,7 @@ void log_msg(LogLevel level, const char *fmt, ...) {
 
     FILE *out = (level >= LOG_LVL_WARN) ? stderr : stdout;
 
-    fprintf(out, "%s %s%s%s ", time_str, color, prefix, reset);
+    fprintf(out, "\r\033[K%s %s%s%s ", time_str, color, prefix, reset);
 
     va_list args;
     va_start(args, fmt);

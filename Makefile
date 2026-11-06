@@ -16,7 +16,7 @@ FFMPEG_LDFLAGS += $(SRT_LDFLAGS)
 
 INCLUDES = -Isrc -IBMSDK_14_2/Linux/include
 
-SRCS_C = src/main.c src/pipeline.c src/utils.c src/logger.c src/rtmp.c src/hls.c src/srt.c src/transcode.c
+SRCS_C = src/main.c src/pipeline.c src/utils.c src/logger.c src/rtmp.c src/hls.c src/srt.c src/transcode.c src/st2022_7.c
 SRCS_CPP = src/sdi_decklink.cpp BMSDK_14_2/Linux/include/DeckLinkAPIDispatch.cpp
 OBJS_C = $(SRCS_C:.c=.o)
 OBJS_CPP = src/sdi_decklink.o BMSDK_14_2/Linux/include/DeckLinkAPIDispatch.o

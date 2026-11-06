@@ -11,6 +11,7 @@
 #include "srt.h"
 #include "transcode.h"
 #include "sdi_decklink.h"
+#include "st2022_7.h"
 
 #define PIPELINE_NAME "ixgIPStream"
 #define PIPELINE_VERSION "v4.2.0"
@@ -93,6 +94,14 @@ typedef struct PipelineConfig {
 
     /* Audio Transcoding Settings */
     AudioTranscodeConfig audio_transcode;
+
+    /* SMPTE ST 2022-7 Hitless Path Redundancy Settings */
+    bool enable_st2022_7;            /* True if -I / --input-b was specified */
+    char input_b_url[1024];          /* Secondary stream URL (Path B) */
+    char local_addr_b[128];          /* Local interface IP for Path B */
+    int hitless_skew_ms;             /* Skew tolerance buffer in ms (default: 100) */
+    char hitless_mode[16];           /* "auto", "rtp", "ts" */
+    int buffer_size_b;               /* Socket receive buffer in bytes for Path B */
 } PipelineConfig;
 
 typedef struct OutputContext {
@@ -247,6 +256,32 @@ typedef struct PipelineStats {
     double srt_in_arq_success_pct;
     double srt_in_rcv_rate_mbps;
     int srt_in_rcv_buf_ms;
+
+    /* SMPTE ST 2022-7 Telemetry */
+    uint64_t st2022_pkts_path_a;
+    uint64_t st2022_pkts_path_b;
+    uint64_t st2022_pkts_used_a;
+    uint64_t st2022_pkts_used_b;
+    uint64_t st2022_pkts_salvaged;
+    uint64_t st2022_duplicates_drop;
+    uint64_t st2022_gaps_unrecoverable;
+    uint64_t last_st2022_pkts_path_a;
+    uint64_t last_st2022_pkts_path_b;
+    uint64_t last_st2022_pkts_used_a;
+    uint64_t last_st2022_pkts_used_b;
+    uint64_t last_st2022_duplicates_drop;
+    uint64_t last_st2022_gaps_unrecoverable;
+    uint64_t last_st2022_pkts_salvaged;
+    double st2022_pps_a;
+    double st2022_pps_b;
+    double st2022_used_pps_a;
+    double st2022_used_pps_b;
+    double st2022_drop_pps;
+    double st2022_salvaged_pps;
+    double st2022_skew_ms;
+    bool st2022_path_a_active;
+    bool st2022_path_b_active;
+    int st2022_buffer_depth;
 
     /* RTMP Egress Telemetry & TCP Loss */
     uint64_t rtmp_packets_written;

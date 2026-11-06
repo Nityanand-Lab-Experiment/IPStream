@@ -25,6 +25,7 @@ set(SOURCES
     src/hls.c
     src/srt.c
     src/transcode.c
+    src/st2022_7.c
     src/sdi_decklink.cpp
     BMSDK_14_2/Linux/include/DeckLinkAPIDispatch.cpp
 )

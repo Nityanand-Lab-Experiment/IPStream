@@ -10,9 +10,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <signal.h>
+
+static volatile sig_atomic_t s_signal_received = 0;
 
 static void on_signal(int sig) {
   (void)sig;
+  if (s_signal_received) return;  /* Prevent repeated messages on multiple signals */
+  s_signal_received = 1;
   LOG_WARN("\nReceived interrupt signal. Initiating graceful shutdown...");
   pipeline_request_stop();
 }
@@ -146,6 +151,14 @@ static void print_usage(const char *prog_name) {
   printf("  --monitor-fps <num>        Capture rate in FPS (Default: 5)\n");
   printf("  --monitor-scale <WxH>      Scale snapshot resolution (e.g. 640x360, default: native)\n");
   printf("  --monitor-quality <1-31>   JPEG quality (Default: 4, 1=highest)\n\n");
+  printf("SMPTE ST 2022-7 Hitless Redundancy Options:\n");
+  printf("  -I, --input-b <url>        Secondary redundant input stream (Path B)\n");
+  printf("                             Enables SMPTE ST 2022-7 hitless seamless protection switching\n");
+  printf("                             Example: -I rtp://@239.255.0.2:5004  or  -I udp://@239.255.0.2:1234\n");
+  printf("      --local-addr-b <ip>    Local network interface IP for Path B (e.g. 192.168.20.100 on eth1)\n");
+  printf("      --hitless-skew <ms>    Playout skew tolerance buffer in milliseconds (Default: 100, range: 10-2000)\n");
+  printf("      --hitless-mode <mode>  Alignment algorithm: auto, rtp, ts (Default: auto)\n");
+  printf("      --buffer-size-b <mb>   Kernel receive buffer for Path B socket in MB (Default: same as -b)\n\n");
   printf("Examples:\n");
   printf("  # 1. SDI Ingest -> Hardware H.265 (HEVC NVENC) -> Low-Latency SRT Egress\n");
   printf("  %s -i \"sdi:DeckLink Duo (1)\" -o srt srt://192.168.1.100:9000 --vcodec hevc_nvenc --low-latency\n\n", prog_name);
@@ -235,10 +248,17 @@ int main(int argc, char **argv) {
       {"framerate", required_argument, 0, 1055},
       {"sync-type", required_argument, 0, 1060},
       {"sync", required_argument, 0, 1060},
+      {"input-b", required_argument, 0, 'I'},
+      {"redundant-input", required_argument, 0, 'I'},
+      {"local-addr-b", required_argument, 0, 1070},
+      {"hitless-skew", required_argument, 0, 1071},
+      {"st2022-7-skew", required_argument, 0, 1071},
+      {"hitless-mode", required_argument, 0, 1072},
+      {"buffer-size-b", required_argument, 0, 1073},
       {0, 0, 0, 0}};
 
   int opt;
-  while ((opt = getopt_long(argc, argv, "i:o:a:f:b:t:kns:ldjvhV", long_options,
+  while ((opt = getopt_long(argc, argv, "i:I:o:a:f:b:t:kns:ldjvhV", long_options,
                             NULL)) != -1) {
     switch (opt) {
     case 'V':
@@ -538,6 +558,27 @@ int main(int argc, char **argv) {
       break;
     case 1060:
       config.sync_type = parse_sync_type(optarg);
+      break;
+    case 'I':
+      strncpy(config.input_b_url, optarg, sizeof(config.input_b_url) - 1);
+      config.input_b_url[sizeof(config.input_b_url) - 1] = '\0';
+      config.enable_st2022_7 = true;
+      break;
+    case 1070:
+      strncpy(config.local_addr_b, optarg, sizeof(config.local_addr_b) - 1);
+      config.local_addr_b[sizeof(config.local_addr_b) - 1] = '\0';
+      break;
+    case 1071:
+      config.hitless_skew_ms = atoi(optarg);
+      if (config.hitless_skew_ms < 10) config.hitless_skew_ms = 10;
+      if (config.hitless_skew_ms > 2000) config.hitless_skew_ms = 2000;
+      break;
+    case 1072:
+      strncpy(config.hitless_mode, optarg, sizeof(config.hitless_mode) - 1);
+      config.hitless_mode[sizeof(config.hitless_mode) - 1] = '\0';
+      break;
+    case 1073:
+      config.buffer_size_b = atoi(optarg) * 1024 * 1024;
       break;
     case 'h':
       print_usage(argv[0]);

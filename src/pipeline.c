@@ -47,6 +47,7 @@ static void create_parent_dir_if_local(const char *filepath) {
 static volatile sig_atomic_t s_stop_requested = 0;
 static volatile uint64_t s_udp_lost_packets = 0;
 static volatile uint64_t s_udp_cc_errors = 0;
+static St2022Context *s_st2022_ctx = NULL;  /* For signal-time stop propagation */
 
 static void ffmpeg_log_callback(void *ptr, int level, const char *fmt, va_list vl) {
     if (level <= AV_LOG_WARNING && fmt && strstr(fmt, "Continuity check failed")) {
@@ -68,7 +69,22 @@ static void ffmpeg_log_callback(void *ptr, int level, const char *fmt, va_list v
         }
         return; /* Suppress raw line to prevent corrupting live terminal UI */
     }
-    av_log_default_callback(ptr, level, fmt, vl);
+
+    if (level > av_log_get_level()) {
+        return;
+    }
+
+    char line[1024];
+    static int print_prefix = 1;
+    av_log_format_line2(ptr, level, fmt, vl, line, sizeof(line), &print_prefix);
+
+    /* Erase in-progress single-line telemetry and print FFmpeg log cleanly on a new line */
+    fprintf(stderr, "\r\033[K%s", line);
+    size_t len = strlen(line);
+    if (len > 0 && line[len - 1] != '\n') {
+        fprintf(stderr, "\n");
+    }
+    fflush(stderr);
 }
 
 typedef struct {
@@ -182,10 +198,22 @@ void pipeline_config_init_defaults(PipelineConfig *config) {
     config->audio_transcode.abitrate = 192000;
     config->audio_transcode.sample_rate = 48000;
     config->audio_transcode.channels = 2;
+
+    /* SMPTE ST 2022-7 Defaults */
+    config->enable_st2022_7 = false;
+    config->input_b_url[0] = '\0';
+    config->local_addr_b[0] = '\0';
+    config->hitless_skew_ms = 100;
+    strncpy(config->hitless_mode, "auto", sizeof(config->hitless_mode) - 1);
+    config->buffer_size_b = 16 * 1024 * 1024;
 }
 
 void pipeline_request_stop(void) {
     s_stop_requested = 1;
+    /* Unblock st2022_7_read_packet() so av_read_frame() can return */
+    if (s_st2022_ctx) {
+        st2022_7_request_stop(s_st2022_ctx);
+    }
 }
 
 static void log_stream_info(const AVStream *stream, int stream_index, const char *prefix) {
@@ -471,6 +499,8 @@ int pipeline_run(const PipelineConfig *config) {
     SdiInputContext *sdi_in = NULL;
     TranscodeEngine *transcoder = NULL;
     AudioTranscodeEngine *a_transcoder = NULL;
+    St2022Context *st2022_ctx = NULL;
+    AVIOContext *st2022_avio = NULL;
     int num_sdi_outputs = 0;
     int srt_in_sock = -1;
     int sdi_w = 1920, sdi_h = 1080;
@@ -561,6 +591,56 @@ int pipeline_run(const PipelineConfig *config) {
             LOG_INFO("[SDI Ingress] Native Blackmagic SDI audio stream registered: 48kHz %d ch PCM S16LE",
                      as->codecpar->ch_layout.nb_channels);
         }
+    } else if (config->enable_st2022_7) {
+        LOG_INFO("[ST 2022-7 Ingress] Initializing SMPTE ST 2022-7 Seamless Protection Switching...");
+        LOG_INFO("[ST 2022-7 Ingress] Path A: %s (Bind: %s)", config->input_url, config->local_addr[0] ? config->local_addr : "ANY");
+        LOG_INFO("[ST 2022-7 Ingress] Path B: %s (Bind: %s)", config->input_b_url, config->local_addr_b[0] ? config->local_addr_b : "ANY");
+        LOG_INFO("[ST 2022-7 Ingress] Skew Tolerance Buffer: %d ms | Mode: %s", config->hitless_skew_ms, config->hitless_mode);
+
+        st2022_ctx = st2022_7_open(config);
+        s_st2022_ctx = st2022_ctx;  /* Enable signal-time stop propagation */
+        if (!st2022_ctx) {
+            LOG_ERROR("[ST 2022-7 Ingress] Failed to initialize hitless dual receiver!");
+            ret = AVERROR(EIO);
+            goto cleanup;
+        }
+
+        size_t avio_buf_size = 65536;
+        uint8_t *avio_buf = (uint8_t *)av_malloc(avio_buf_size);
+        if (!avio_buf) {
+            ret = AVERROR(ENOMEM);
+            goto cleanup;
+        }
+
+        st2022_avio = avio_alloc_context(avio_buf, (int)avio_buf_size, 0, st2022_ctx, st2022_7_read_packet, NULL, NULL);
+        if (!st2022_avio) {
+            av_free(avio_buf);
+            ret = AVERROR(ENOMEM);
+            goto cleanup;
+        }
+
+        ifmt_ctx = avformat_alloc_context();
+        if (!ifmt_ctx) {
+            ret = AVERROR(ENOMEM);
+            goto cleanup;
+        }
+
+        ifmt_ctx->pb = st2022_avio;
+        ifmt_ctx->flags |= AVFMT_FLAG_CUSTOM_IO;
+        ifmt_ctx->interrupt_callback.callback = interrupt_cb;
+        ifmt_ctx->interrupt_callback.opaque = &interrupt_ctx;
+        interrupt_ctx.last_packet_time_us = av_gettime_relative();
+
+        const AVInputFormat *in_fmt = av_find_input_format("mpegts");
+        int64_t input_conn_start_us = get_time_us();
+        ret = avformat_open_input(&ifmt_ctx, NULL, in_fmt, NULL);
+        int64_t input_conn_time_ms = (get_time_us() - input_conn_start_us) / 1000;
+        if (ret < 0) {
+            av_strerror(ret, err_buf, sizeof(err_buf));
+            LOG_ERROR("[ST 2022-7 Ingress] avformat_open_input failed on redundant stream: %s", err_buf);
+            goto cleanup;
+        }
+        LOG_INFO("[ST 2022-7 Ingress] MPEG-TS demuxer locked onto seamless redundant stream in %lld ms.", (long long)input_conn_time_ms);
     } else {
         /* 1. Allocate input context with interrupt callback */
         ifmt_ctx = avformat_alloc_context();
@@ -661,7 +741,9 @@ int pipeline_run(const PipelineConfig *config) {
         } else {
             LOG_INFO("[UDP STATUS] Multicast socket bound and active in %lld ms.", (long long)input_conn_time_ms);
         }
+    }
 
+    if (!is_sdi_input) {
         /* 3. Probe stream information */
         LOG_INFO("Probing input stream information...");
         interrupt_ctx.last_packet_time_us = av_gettime_relative();
@@ -932,6 +1014,18 @@ int pipeline_run(const PipelineConfig *config) {
             if (ret < 0) {
                 LOG_ERROR("Failed to copy codec parameters for stream #%d", i);
                 goto cleanup;
+            }
+            if (out_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+                if (out_stream->codecpar->sample_rate <= 0) {
+                    out_stream->codecpar->sample_rate = (config->audio_transcode.sample_rate > 0) ?
+                                                        config->audio_transcode.sample_rate : 48000;
+                    LOG_WARN("[AUDIO] Audio sample rate was not detected in stream. Defaulting to %d Hz",
+                             out_stream->codecpar->sample_rate);
+                }
+                if (out_stream->codecpar->ch_layout.nb_channels <= 0) {
+                    av_channel_layout_default(&out_stream->codecpar->ch_layout,
+                                              (config->audio_transcode.channels > 0) ? config->audio_transcode.channels : 2);
+                }
             }
             out_stream->codecpar->codec_tag = 0;
             char prefix[64];
@@ -1831,6 +1925,32 @@ check_telemetry:
                 double elapsed_sec = (double)elapsed_stats_us / 1000000.0;
                 int64_t uptime_sec = (now_us - stats.start_time_us) / 1000000LL;
 
+                /* ST 2022-7 Telemetry Stats Update */
+                if (st2022_ctx) {
+                    St2022Stats st_stats;
+                    st2022_7_get_stats(st2022_ctx, &st_stats);
+                    stats.st2022_pkts_path_a = st_stats.pkts_path_a;
+                    stats.st2022_pkts_path_b = st_stats.pkts_path_b;
+                    stats.st2022_pkts_used_a = st_stats.pkts_used_a;
+                    stats.st2022_pkts_used_b = st_stats.pkts_used_b;
+                    stats.st2022_pkts_salvaged = st_stats.pkts_salvaged;
+                    stats.st2022_duplicates_drop = st_stats.duplicates_dropped;
+                    stats.st2022_gaps_unrecoverable = st_stats.gaps_unrecoverable;
+                    stats.st2022_skew_ms = st_stats.differential_skew_ms;
+                    stats.st2022_path_a_active = st_stats.path_a_active;
+                    stats.st2022_path_b_active = st_stats.path_b_active;
+                    stats.st2022_buffer_depth = st_stats.buffer_depth_pkts;
+
+                    if (elapsed_sec > 0.0) {
+                        stats.st2022_pps_a = (double)(stats.st2022_pkts_path_a - stats.last_st2022_pkts_path_a) / elapsed_sec;
+                        stats.st2022_pps_b = (double)(stats.st2022_pkts_path_b - stats.last_st2022_pkts_path_b) / elapsed_sec;
+                        stats.st2022_used_pps_a = (double)(stats.st2022_pkts_used_a - stats.last_st2022_pkts_used_a) / elapsed_sec;
+                        stats.st2022_used_pps_b = (double)(stats.st2022_pkts_used_b - stats.last_st2022_pkts_used_b) / elapsed_sec;
+                        stats.st2022_drop_pps = (double)(stats.st2022_duplicates_drop - stats.last_st2022_duplicates_drop) / elapsed_sec;
+                        stats.st2022_salvaged_pps = (double)(stats.st2022_pkts_salvaged - stats.last_st2022_pkts_salvaged) / elapsed_sec;
+                    }
+                }
+
                 /* SDI Ingress & Playout Telemetry */
                 double raw_sdi_in_fps = (elapsed_sec > 0.0) ? (double)(stats.sdi_frames_read - last_sdi_frames_read) / elapsed_sec : 0.0;
                 double raw_sdi_out_fps = (elapsed_sec > 0.0) ? (double)(stats.sdi_frames_written - last_sdi_frames_written) / elapsed_sec : 0.0;
@@ -2200,6 +2320,16 @@ check_telemetry:
                                (unsigned long long)stats.udp_cc_errors,
                                stats.udp_loss_pct, stats.cur_interval_loss_pct);
                     }
+                    if (config->enable_st2022_7) {
+                        printf(",\"multipath_receiver\":{\"path_0\":{\"status\":\"%s\",\"pps\":%.1f,\"used_pps\":%.1f,\"total_packets\":%llu,\"total_used\":%llu},\"path_1\":{\"status\":\"%s\",\"pps\":%.1f,\"used_pps\":%.1f,\"total_packets\":%llu,\"total_used\":%llu},\"duplicates_dropped\":%llu,\"drop_pps\":%.1f,\"salvaged_packets\":%llu,\"salvaged_pps\":%.1f,\"unrecoverable_gaps\":%llu,\"differential_skew_ms\":%.2f,\"buffer_depth\":%d}",
+                               stats.st2022_path_a_active ? "UP" : "DOWN", stats.st2022_pps_a, stats.st2022_used_pps_a,
+                               (unsigned long long)stats.st2022_pkts_path_a, (unsigned long long)stats.st2022_pkts_used_a,
+                               stats.st2022_path_b_active ? "UP" : "DOWN", stats.st2022_pps_b, stats.st2022_used_pps_b,
+                               (unsigned long long)stats.st2022_pkts_path_b, (unsigned long long)stats.st2022_pkts_used_b,
+                               (unsigned long long)stats.st2022_duplicates_drop, stats.st2022_drop_pps,
+                               (unsigned long long)stats.st2022_pkts_salvaged, stats.st2022_salvaged_pps,
+                               (unsigned long long)stats.st2022_gaps_unrecoverable, stats.st2022_skew_ms, stats.st2022_buffer_depth);
+                    }
                     printf("}");
 
                     /* RTMP Output(s) in JSON */
@@ -2361,8 +2491,17 @@ check_telemetry:
                         snprintf(mon_str, sizeof(mon_str), " | Mon: %llu imgs", (unsigned long long)stats.monitor_frames_written);
                     }
 
-                    char in_str[192];
-                    if (is_sdi_input) {
+                    char in_str[256];
+                    if (config->enable_st2022_7) {
+                        const char *status_0 = stats.st2022_path_a_active ? "UP" : "DOWN";
+                        const char *status_1 = stats.st2022_path_b_active ? "UP" : "DOWN";
+                        snprintf(in_str, sizeof(in_str),
+                                 "[multipath_receiver] Path 0 (%s): %.0f pkts/s (%.0f used) | Path 1 (%s): %.0f pkts/s (%.0f used) | Drops: %.0f/s (Tot: %llu) | Gaps: %llu",
+                                 status_0, stats.st2022_pps_a, stats.st2022_used_pps_a,
+                                 status_1, stats.st2022_pps_b, stats.st2022_used_pps_b,
+                                 stats.st2022_drop_pps, (unsigned long long)stats.st2022_duplicates_drop,
+                                 (unsigned long long)stats.st2022_gaps_unrecoverable);
+                    } else if (is_sdi_input) {
                         snprintf(in_str, sizeof(in_str), "SDI-IN: %llu frames (%.1f fps)",
                                  (unsigned long long)stats.sdi_frames_read, stats.sdi_in_fps);
                     } else if (is_srt_input) {
@@ -2475,7 +2614,27 @@ check_telemetry:
 
                     printf("\n\033[1;36m┌── [INFO @ %s] (%s) ──────────────────────────────────────────────────────────\033[0m\n",
                            uptime_str, title_outputs);
-                    if (is_sdi_input) {
+                    if (config->enable_st2022_7) {
+                        printf("│  \033[1;33m[ST 2022-7 Multipath Receiver]\033[0m : %s | Skew: %+.2f ms | Playout Buf: %d pkts\n",
+                               (stats.st2022_path_a_active && stats.st2022_path_b_active) ? "\033[1;32mOPTIMAL (Path 0+1 ONLINE)\033[0m" :
+                               (stats.st2022_path_a_active) ? "\033[1;33mDEGRADED (Path 0 ONLY)\033[0m" :
+                               (stats.st2022_path_b_active) ? "\033[1;33mDEGRADED (Path 1 ONLY - FAILING OVER)\033[0m" : "\033[1;31mOFFLINE\033[0m",
+                               stats.st2022_skew_ms, stats.st2022_buffer_depth);
+                        printf("│    ├─ Path 0 (%s): %llu pkts (%5.0f pkts/s, %5.0f used/s, tot used: %llu) | Bind: %s\n",
+                               stats.st2022_path_a_active ? "UP" : "DOWN",
+                               (unsigned long long)stats.st2022_pkts_path_a, stats.st2022_pps_a,
+                               stats.st2022_used_pps_a, (unsigned long long)stats.st2022_pkts_used_a,
+                               config->local_addr[0] ? config->local_addr : "ANY");
+                        printf("│    ├─ Path 1 (%s): %llu pkts (%5.0f pkts/s, %5.0f used/s, tot used: %llu) | Bind: %s\n",
+                               stats.st2022_path_b_active ? "UP" : "DOWN",
+                               (unsigned long long)stats.st2022_pkts_path_b, stats.st2022_pps_b,
+                               stats.st2022_used_pps_b, (unsigned long long)stats.st2022_pkts_used_b,
+                               config->local_addr_b[0] ? config->local_addr_b : "ANY");
+                        printf("│    └─ Hitless Merge : %llu salvaged from Path 1 (%4.0f/s) | %llu duplicates dropped (%4.0f/s) | %llu unrecoverable gaps\n",
+                               (unsigned long long)stats.st2022_pkts_salvaged, stats.st2022_salvaged_pps,
+                               (unsigned long long)stats.st2022_duplicates_drop, stats.st2022_drop_pps,
+                               (unsigned long long)stats.st2022_gaps_unrecoverable);
+                    } else if (is_sdi_input) {
                         printf("│  \033[1;32m[SDI Ingress]\033[0m   : %llu frames read | %5.1f fps | Port: %s\n",
                                (unsigned long long)stats.sdi_frames_read, stats.sdi_in_fps, config->input_url + 4);
                     } else if (is_srt_input) {
@@ -2725,8 +2884,25 @@ check_telemetry:
                         snprintf(mon_badge, sizeof(mon_badge), " │ \033[33mMon:\033[0m %llu", (unsigned long long)stats.monitor_frames_written);
                     }
 
-                    char in_badge[96];
-                    if (is_sdi_input) {
+                    char in_badge[256];
+                    if (config->enable_st2022_7) {
+                        const char *status_0 = stats.st2022_path_a_active ? "\033[32mUP\033[0m" : "\033[31mDOWN\033[0m";
+                        const char *status_1 = stats.st2022_path_b_active ? "\033[32mUP\033[0m" : "\033[31mDOWN\033[0m";
+                        if (stats.st2022_gaps_unrecoverable > 0) {
+                            snprintf(in_badge, sizeof(in_badge),
+                                     "Path 0 (%s): %4.0f pkts/s (%4.0f used) │ Path 1 (%s): %4.0f pkts/s (%4.0f used) │ \033[33mDrop:\033[0m %4.0f/s │ \033[31mGap:\033[0m %llu",
+                                     status_0, stats.st2022_pps_a, stats.st2022_used_pps_a,
+                                     status_1, stats.st2022_pps_b, stats.st2022_used_pps_b,
+                                     stats.st2022_drop_pps,
+                                     (unsigned long long)stats.st2022_gaps_unrecoverable);
+                        } else {
+                            snprintf(in_badge, sizeof(in_badge),
+                                     "Path 0 (%s): %4.0f pkts/s (%4.0f used) │ Path 1 (%s): %4.0f pkts/s (%4.0f used) │ \033[33mDrop:\033[0m %4.0f/s",
+                                     status_0, stats.st2022_pps_a, stats.st2022_used_pps_a,
+                                     status_1, stats.st2022_pps_b, stats.st2022_used_pps_b,
+                                     stats.st2022_drop_pps);
+                        }
+                    } else if (is_sdi_input) {
                         snprintf(in_badge, sizeof(in_badge), "\033[32mSDI-IN:\033[0m %llu f (%4.1f fps)",
                                  (unsigned long long)stats.sdi_frames_read, stats.sdi_in_fps);
                     } else if (is_srt_input) {
@@ -2826,7 +3002,7 @@ check_telemetry:
                         snprintf(status_badge, sizeof(status_badge), "\033[32mOK 🟢\033[0m");
                     }
 
-                    printf("\r\033[36m[%s]\033[0m %s%s%s%s%s%s%s%s%s │ \033[1;37mSpd:\033[0m %4.2fx │ %s   ",
+                    printf("\r\033[K\033[36m[%s]\033[0m %s%s%s%s%s%s%s%s%s │ \033[1;37mSpd:\033[0m %4.2fx │ %s",
                            uptime_str, in_badge, rtmp_badge, hls_badge, srt_badge, rtp_out_badge, udp_out_badge, sdi_out_badge, trans_badge, mon_badge,
                            stats.cur_speed_factor, status_badge);
                     fflush(stdout);
@@ -2838,6 +3014,13 @@ check_telemetry:
                 stats.last_udp_bytes = stats.udp_bytes_read;
                 stats.last_udp_packets = stats.udp_packets_read;
                 stats.last_udp_lost_packets = stats.udp_lost_packets;
+                stats.last_st2022_pkts_path_a = stats.st2022_pkts_path_a;
+                stats.last_st2022_pkts_path_b = stats.st2022_pkts_path_b;
+                stats.last_st2022_pkts_used_a = stats.st2022_pkts_used_a;
+                stats.last_st2022_pkts_used_b = stats.st2022_pkts_used_b;
+                stats.last_st2022_duplicates_drop = stats.st2022_duplicates_drop;
+                stats.last_st2022_gaps_unrecoverable = stats.st2022_gaps_unrecoverable;
+                stats.last_st2022_pkts_salvaged = stats.st2022_pkts_salvaged;
 
                 for (int j = 0; j < num_outputs; j++) {
                     out_ctxs[j].last_bytes = out_ctxs[j].bytes_written;
@@ -2898,6 +3081,16 @@ cleanup:
     }
     if (sdi_in) {
         sdi_input_close(&sdi_in);
+    }
+    if (st2022_ctx) {
+        s_st2022_ctx = NULL;  /* Prevent signal handler from using freed pointer */
+        st2022_7_close(&st2022_ctx);
+    }
+    if (st2022_avio) {
+        if (st2022_avio->buffer) {
+            av_freep(&st2022_avio->buffer);
+        }
+        avio_context_free(&st2022_avio);
     }
     if (pkt) {
         av_packet_free(&pkt);
